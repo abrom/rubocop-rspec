@@ -40,31 +40,11 @@ module RuboCop
 
           MSG = 'Prefer `%<prefer>s` over `%<current>s` '\
                 'to describe HTTP status code.'.freeze
-          WHITELIST_STATUS = %i[error success missing redirect].freeze
 
-          def_node_matcher :http_status, <<-PATTERN
-            (send nil? :have_http_status ${int sym})
-          PATTERN
-
-          def on_send(node) # rubocop:disable Metrics/CyclomaticComplexity
-            http_status(node) do |ast_node|
-              if style == :numeric
-                return if ast_node.int_type?
-                return if ast_node.sym_type? &&
-                    WHITELIST_STATUS.include?(ast_node.value)
-              end
-
-              return if style == :symbolic && ast_node.sym_type?
-
-              add_offense(ast_node)
-            end
-          end
-
-          def message(node)
-            prefer, current = message_without_autocorrect unless RACK_LOADED
-            prefer, current = message_for_autocorrect(node) if RACK_LOADED
-
-            format(MSG, prefer: prefer, current: current)
+          def on_send(node)
+            checker = checker_class.new_from_send_node(node)
+            return unless checker.offensive?
+            add_offense(checker.node, message: checker.message)
           end
 
           def support_autocorrect?
@@ -72,54 +52,120 @@ module RuboCop
           end
 
           def autocorrect(node)
-            replacement = new_value(node)
+            checker = checker_class.new(node)
+            replacement = checker.preferred_style
             return if replacement.nil?
 
             lambda do |corrector|
-              corrector.replace(node.loc.expression, replacement.to_s)
+              corrector.replace(node.loc.expression, replacement)
             end
           end
 
           private
 
-          def new_value(node)
+          def checker_class
             case style
-            when :numeric
-              numeric, = symbolic_to_numeric_value(node)
-              numeric
             when :symbolic
-              symbol, = numeric_to_symbolic_value(node)
-              symbol
+              SymbolicStyleChecker
+            when :numeric
+              NumericStyleChecker
             end
           end
 
-          def numeric_to_symbolic_value(node)
-            numeric = node.source.to_i
-            symbol = ":#{::Rack::Utils::SYMBOL_TO_STATUS_CODE.key(numeric)}"
+          # :nodoc:
+          class SymbolicStyleChecker
+            class << self
+              extend ::RuboCop::NodePattern::Macros
 
-            [symbol, numeric]
-          end
+              def_node_matcher :numeric_http_status, <<-PATTERN
+                (send nil? :have_http_status $int)
+              PATTERN
 
-          def symbolic_to_numeric_value(node)
-            symbol = node.value
-            numeric = ::Rack::Utils::SYMBOL_TO_STATUS_CODE[symbol]
-
-            [numeric, symbol]
-          end
-
-          def message_for_autocorrect(node)
-            if style == :numeric
-              prefer, current = symbolic_to_numeric_value(node)
-              return [prefer, ":#{current}"]
+              def new_from_send_node(send_node)
+                node = numeric_http_status(send_node)
+                new(node)
+              end
             end
 
-            numeric_to_symbolic_value(node)
+            attr_reader :node
+            def initialize(node)
+              @node = node
+            end
+
+            def offensive?
+              !node.nil?
+            end
+
+            def message
+              format(MSG, prefer: preferred_style, current: current_style)
+            end
+
+            def preferred_style
+              RACK_LOADED ? symbol.inspect : 'symbolic'
+            end
+
+            private
+
+            def current_style
+              RACK_LOADED ? number.to_s : 'numeric'
+            end
+
+            def symbol
+              ::Rack::Utils::SYMBOL_TO_STATUS_CODE.key(number)
+            end
+
+            def number
+              node.source.to_i
+            end
           end
 
-          def message_without_autocorrect
-            return %i[numeric symbolic] if style == :numeric
+          # :nodoc:
+          class NumericStyleChecker
+            class << self
+              extend ::RuboCop::NodePattern::Macros
 
-            %i[symbolic numeric]
+              def_node_matcher :symbolic_http_status, <<-PATTERN
+                (send nil? :have_http_status $sym)
+              PATTERN
+
+              def new_from_send_node(send_node)
+                node = symbolic_http_status(send_node)
+                new(node)
+              end
+            end
+
+            WHITELIST_STATUS = %i[error success missing redirect].freeze
+
+            attr_reader :node
+            def initialize(node)
+              @node = node
+            end
+
+            def offensive?
+              !node.nil? && !WHITELIST_STATUS.include?(node.value)
+            end
+
+            def message
+              format(MSG, prefer: preferred_style, current: current_style)
+            end
+
+            def preferred_style
+              RACK_LOADED ? number.to_s : 'numeric'
+            end
+
+            private
+
+            def current_style
+              RACK_LOADED ? symbol.inspect : 'symbolic'
+            end
+
+            def number
+              ::Rack::Utils::SYMBOL_TO_STATUS_CODE[symbol]
+            end
+
+            def symbol
+              node.value
+            end
           end
         end
       end
